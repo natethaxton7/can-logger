@@ -10,7 +10,19 @@ static QueueHandle_t      s_rx_queue = NULL;
 static uint8_t      s_tx_buf[CAN_MAX_DATA_LEN];   // ← needs the [CAN_MAX_DATA_LEN]
 static twai_frame_t s_tx_frame = {
     .buffer = s_tx_buf,                           // ← comma, not semicolon
-};                                                // ← closing brace + semicolon
+};    
+static volatile bool s_last_tx_ok = false;   // set by the TX-done interrupt                                            // ← closing brace + semicolon
+// Runs in INTERRUPT context when a frame finishes transmitting
+
+
+
+static bool on_tx_done(twai_node_handle_t handle,
+                       const twai_tx_done_event_data_t *edata,
+                       void *user_ctx)
+{
+    s_last_tx_ok = edata->is_tx_success;
+    return false;
+}
 
 static bool on_rx_done(twai_node_handle_t handle,
                        const twai_rx_done_event_data_t *edata,
@@ -59,9 +71,11 @@ esp_err_t can_bus_init(const can_bus_config_t *cfg)
     }
 
     // Callbacks must be registered BEFORE the node is enabled
-    twai_event_callbacks_t cbs = {
+        twai_event_callbacks_t cbs = {
         .on_rx_done = on_rx_done,
+        .on_tx_done = on_tx_done,
     };
+
     err = twai_node_register_event_callbacks(s_node, &cbs, NULL);
     if (err != ESP_OK) {
         return err;
@@ -92,11 +106,17 @@ esp_err_t can_bus_send(uint32_t id, const uint8_t *data, uint8_t len, int timeou
     s_tx_frame.header.id = id;        // standard 11-bit ID
     s_tx_frame.buffer_len = len;
 
+        s_last_tx_ok = false;
     err = twai_node_transmit(s_node, &s_tx_frame, timeout_ms);
     if (err != ESP_OK) {
         return err;
     }
-    return twai_node_transmit_wait_all_done(s_node, timeout_ms);
+
+    err = twai_node_transmit_wait_all_done(s_node, timeout_ms);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return s_last_tx_ok ? ESP_OK : ESP_FAIL;
 }
 
 bool can_bus_receive(can_msg_t *msg, TickType_t wait)
